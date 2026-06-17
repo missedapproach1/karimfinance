@@ -68,9 +68,12 @@ INITIAL_SETTINGS = [
 
 class Sheets:
     def __init__(self):
-        import os, json as _json
+        import os, json as _json, base64 as _b64
+        cb = os.getenv("GOOGLE_CREDENTIALS_B64", "").strip()
         cj = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
-        if cj:
+        if cb:
+            creds = Credentials.from_service_account_info(_json.loads(_b64.b64decode(cb)), scopes=SCOPES)
+        elif cj:
             creds = Credentials.from_service_account_info(_json.loads(cj), scopes=SCOPES)
         else:
             creds = Credentials.from_service_account_file(config.GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
