@@ -31,8 +31,9 @@ def validate():
         errors.append("OWNER_TELEGRAM_ID не задан")
     if not GOOGLE_SHEET_ID:
         errors.append("GOOGLE_SHEET_ID не задан")
+    has_b64 = bool(os.getenv("GOOGLE_CREDENTIALS_B64", "").strip())
     has_json = bool(os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip())
     has_file = os.path.exists(GOOGLE_CREDENTIALS_FILE)
-    if not has_json and not has_file:
+    if not has_b64 and not has_json and not has_file:
         errors.append("Нет ключа Google")
     return errors
