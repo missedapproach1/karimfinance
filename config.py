@@ -3,6 +3,14 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+import os as _os
+print("=== ДИАГНОСТИКА ОКРУЖЕНИЯ ===", flush=True)
+print("B64 есть:", bool(_os.getenv("GOOGLE_CREDENTIALS_B64", "").strip()), flush=True)
+print("B64 длина:", len(_os.getenv("GOOGLE_CREDENTIALS_B64", "")), flush=True)
+print("BOT_TOKEN есть:", bool(_os.getenv("BOT_TOKEN", "").strip()), flush=True)
+print("OWNER есть:", _os.getenv("OWNER_TELEGRAM_ID", "ПУСТО"), flush=True)
+print("=== КОНЕЦ ДИАГНОСТИКИ ===", flush=True)
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0").strip() or 0)
