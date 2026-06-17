@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import config
 import handlers
+import assistant_handlers
 import salary as sal
 import finance as fin
 import debts as debts_mod
@@ -189,6 +190,7 @@ async def main():
     # бот
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(assistant_handlers.arouter)
     dp.include_router(handlers.router)
 
     # планировщик
