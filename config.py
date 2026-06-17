@@ -1,4 +1,4 @@
-"""Конфигурация бота — загрузка из .env"""
+"""Конфигурация бота"""
 import os
 from dotenv import load_dotenv
 
@@ -15,14 +15,16 @@ TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow").strip()
 
 
 def validate():
-    """Проверка обязательных переменных при старте."""
+    import os
     errors = []
     if not BOT_TOKEN:
-        errors.append("BOT_TOKEN не задан в .env")
+        errors.append("BOT_TOKEN не задан")
     if not OWNER_TELEGRAM_ID:
-        errors.append("OWNER_TELEGRAM_ID не задан в .env")
+        errors.append("OWNER_TELEGRAM_ID не задан")
     if not GOOGLE_SHEET_ID:
-        errors.append("GOOGLE_SHEET_ID не задан в .env")
-    if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
-        errors.append(f"Файл {GOOGLE_CREDENTIALS_FILE} не найден")
+        errors.append("GOOGLE_SHEET_ID не задан")
+    has_json = bool(os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip())
+    has_file = os.path.exists(GOOGLE_CREDENTIALS_FILE)
+    if not has_json and not has_file:
+        errors.append("Нет ключа Google")
     return errors

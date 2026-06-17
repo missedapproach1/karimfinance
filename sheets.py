@@ -68,8 +68,12 @@ INITIAL_SETTINGS = [
 
 class Sheets:
     def __init__(self):
-        creds = Credentials.from_service_account_file(
-            config.GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
+        import os, json as _json
+        cj = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
+        if cj:
+            creds = Credentials.from_service_account_info(_json.loads(cj), scopes=SCOPES)
+        else:
+            creds = Credentials.from_service_account_file(config.GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
         self.gc = gspread.authorize(creds)
         self.ss = self.gc.open_by_key(config.GOOGLE_SHEET_ID)
         self._cache = {}
