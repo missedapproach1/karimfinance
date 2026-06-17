@@ -70,6 +70,8 @@ async def ask_assistant(user_text, data, history=None):
                 r = await client.post(url, json=body, headers=h)
                 if r.status_code in (401, 403):
                     continue
+                if r.status_code >= 400:
+                    logger.warning(f"assistant HTTP {r.status_code}: {r.text[:300]}")
                 r.raise_for_status()
                 parts = r.json().get("content", [])
                 text = "".join(p.get("text","") for p in parts if p.get("type")=="text").strip()
