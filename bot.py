@@ -19,6 +19,7 @@ import assistant_handlers
 import salary as sal
 import finance as fin
 import debts as debts_mod
+import reports
 from sheets import Sheets
 
 # ---------- логирование ----------
@@ -137,6 +138,82 @@ async def daily_backup():
         logger.error(f"Ошибка бэкапа/приоритетов: {e}")
 
 
+
+async def weekly_report():
+    """Недельный текстовый отчёт (понедельник 12:00 за прошлую неделю)."""
+    try:
+        start, end = reports.last_week_range(datetime.date.today())
+        ops = sheets.get_operations()
+        agg = reports.aggregate_period(ops, {}, {}, start, end)
+        # короткий ИИ-комментарий
+        comment = ""
+        try:
+            import assistant
+            data = {"баланс": sheets.get_last_balance(),
+                    "общий_долг": debts_mod.total_debt(sheets.get_debts()),
+                    "долги_топ": debts_mod.get_debts_sorted(sheets.get_debts())}
+            txt = (f"Итоги недели: доход {agg['total_income']}, расход {agg['total_expense']}, "
+                   f"на долги {agg['debt_payments']}. Дай ОДНО короткое предложение поддержки/совета.")
+            r = await assistant.ask_assistant(txt, data, [])
+            comment = r.get("reply", "")
+        except Exception as e:
+            logger.warning(f"weekly ai: {e}")
+        text = reports.format_weekly_text(agg, comment)
+        await bot.send_message(config.OWNER_TELEGRAM_ID, text)
+        logger.info("Недельный отчёт отправлен")
+    except Exception as e:
+        logger.error(f"Ошибка недельного отчёта: {e}")
+
+
+async def monthly_report():
+    """Месячный PDF (последний день месяца 12:00)."""
+    try:
+        today = datetime.date.today()
+        # проверка: сегодня последний день месяца?
+        import calendar as _cal
+        last_day = _cal.monthrange(today.year, today.month)[1]
+        if today.day != last_day:
+            return
+        start, end = reports.current_month_range(today)
+        ops = sheets.get_operations()
+        agg = reports.aggregate_period(ops, {}, {}, start, end)
+        all_debts = sheets.get_debts()
+        debts_summary = {
+            "total_after": debts_mod.total_debt(all_debts),
+            "people_after": debts_mod.total_people_debt(all_debts),
+            "closed": [],
+        }
+        # ИИ-комментарий
+        comment = ""
+        try:
+            import assistant
+            data = {"баланс": sheets.get_last_balance(),
+                    "общий_долг": debts_mod.total_debt(all_debts),
+                    "долг_людям": debts_mod.total_people_debt(all_debts),
+                    "долги_топ": debts_mod.get_debts_sorted(all_debts)}
+            txt = (f"Итоги месяца: доход {agg['total_income']}, расход {agg['total_expense']}, "
+                   f"на долги {agg['debt_payments']}, остаток долга {debts_summary['total_after']}. "
+                   f"Дай разбор месяца в 2-3 коротких абзацах: что хорошо, на чём сфокусироваться.")
+            r = await assistant.ask_assistant(txt, data, [])
+            comment = r.get("reply", "")
+        except Exception as e:
+            logger.warning(f"monthly ai: {e}")
+        path = "/app/data/monthly_report.pdf"
+        try:
+            reports.build_monthly_pdf(agg, debts_summary, comment, path)
+            from aiogram.types import FSInputFile
+            await bot.send_document(config.OWNER_TELEGRAM_ID, FSInputFile(path),
+                                    caption=f"📊 Финансовый отчёт за месяц")
+        except Exception as e:
+            logger.error(f"PDF ошибка: {e}")
+            # fallback текстом
+            await bot.send_message(config.OWNER_TELEGRAM_ID,
+                                   reports.format_weekly_text(agg, comment))
+        logger.info("Месячный отчёт отправлен")
+    except Exception as e:
+        logger.error(f"Ошибка месячного отчёта: {e}")
+
+
 def setup_scheduler():
     tz = ZoneInfo(config.TIMEZONE)
     scheduler = AsyncIOScheduler(timezone=tz)
@@ -149,6 +226,12 @@ def setup_scheduler():
     # Напоминание каждый день 10:00
     scheduler.add_job(daily_reminder, CronTrigger(hour=10, minute=0, timezone=tz),
                       id="reminder", misfire_grace_time=3600)
+    # Недельный отчёт: понедельник 12:00
+    scheduler.add_job(weekly_report, CronTrigger(day_of_week="mon", hour=12, minute=0, timezone=tz),
+                      id="weekly", misfire_grace_time=3600)
+    # Месячный отчёт: проверка каждый день в 12:00 (внутри проверяет последний ли день)
+    scheduler.add_job(monthly_report, CronTrigger(hour=12, minute=0, timezone=tz),
+                      id="monthly", misfire_grace_time=3600)
     # Бэкап каждый день 03:00
     scheduler.add_job(daily_backup, CronTrigger(hour=3, minute=0, timezone=tz),
                       id="backup", misfire_grace_time=3600)
