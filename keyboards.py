@@ -13,7 +13,8 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="🤖 Совет", callback_data="advice")
     b.button(text="📋 Мои долги", callback_data="mydebts")
     b.button(text="⚙️ Настройки", callback_data="settings")
-    b.adjust(2, 2, 2, 2)
+    b.button(text="🔄 Выставить баланс", callback_data="setbalance")
+    b.adjust(2, 2, 2, 2, 1)
     return b.as_markup()
 
 

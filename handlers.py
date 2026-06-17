@@ -44,6 +44,10 @@ class SettingFSM(StatesGroup):
     value = State()
 
 
+class BalanceFSM(StatesGroup):
+    amount = State()
+
+
 class CatRemainFSM(StatesGroup):
     pass
 
@@ -530,6 +534,41 @@ async def setting_value(message: Message, state: FSMContext):
         logger.error(f"Ошибка настройки: {e}")
         return await message.answer("⚠️ Google недоступен, не сохранено.", reply_markup=kb.back_home())
     await message.answer(f"✅ {param} = {value:,} ₽", reply_markup=kb.back_home())
+
+
+@router.callback_query(F.data == "setbalance")
+async def cb_setbalance(cq: CallbackQuery, state: FSMContext):
+    if not is_owner(cq.from_user.id):
+        return await deny(cq)
+    await state.set_state(BalanceFSM.amount)
+    cur = SHEETS.get_last_balance()
+    await cq.message.edit_text(
+        f"🔄 Сейчас в системе: {cur:,} ₽\n\nВведи реальный остаток с карты (число):")
+    await cq.answer()
+
+
+@router.message(BalanceFSM.amount)
+async def balance_amount(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        return await deny(message)
+    val = parse_amount(message.text)
+    if val is None or val < 0:
+        return await message.answer("Не понял сумму. Введи число, например 35000:")
+    await state.clear()
+    try:
+        r = SHEETS.set_balance(val)
+    except Exception as e:
+        logger.error(f"Ошибка выставления баланса: {e}")
+        return await message.answer("⚠️ Google недоступен, не записано.", reply_markup=kb.back_home())
+    if r["diff"] == 0:
+        txt = f"✅ Баланс уже точный: {r['new']:,} ₽"
+    elif r["small"]:
+        txt = (f"✅ Баланс выставлен: {r['new']:,} ₽\n"
+               f"Расхождение {r['diff']:+,} ₽ списано в корректировку.")
+    else:
+        txt = (f"✅ Баланс выставлен: {r['new']:,} ₽\n"
+               f"⚠️ Крупное расхождение {r['diff']:+,} ₽ — записал и пометил.")
+    await message.answer(txt, reply_markup=kb.back_home())
 
 
 # ---------- утилита парсинга суммы ----------

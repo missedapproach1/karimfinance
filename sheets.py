@@ -340,6 +340,19 @@ class Sheets:
             self._retry(backup_ws.update, data, value_input_option="USER_ENTERED")
         logger.info("Бэкап операций выполнен")
 
+    def set_balance(self, real_balance: int) -> dict:
+        """Выставляет реальный баланс: пишет операцию-корректировку на разницу."""
+        current = self.get_last_balance()
+        diff = real_balance - current
+        if diff == 0:
+            return {"diff": 0, "current": current, "new": real_balance, "small": True}
+        small = abs(diff) <= 500
+        note = f"корректировка (расхождение {diff:+d} руб)"
+        if not small:
+            note = f"КОРРЕКТИРОВКА КРУПНАЯ {diff:+d} руб"
+        self.add_operation("Корректировка", "Корректировка", diff, note)
+        return {"diff": diff, "current": current, "new": real_balance, "small": small}
+
     def operation_exists_today(self, category: str) -> bool:
         """Есть ли сегодня операция с данной категорией (для идемпотентности начислений)."""
         today = datetime.date.today()
