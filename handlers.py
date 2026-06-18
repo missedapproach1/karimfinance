@@ -12,6 +12,8 @@ from aiogram.types import Message, CallbackQuery
 
 import config
 import keyboards as kb
+import categories as cat_mod
+import categorize as categorize_mod
 import debts as debts_mod
 import finance as fin
 import salary as sal
@@ -36,8 +38,8 @@ class IncomeFSM(StatesGroup):
 
 class ExpenseFSM(StatesGroup):
     amount = State()
-    note = State()
     which_debt = State()
+    other_desc = State()
 
 
 class SettingFSM(StatesGroup):
@@ -184,18 +186,52 @@ def format_distribution(r: dict) -> str:
 async def cb_expense(cq: CallbackQuery):
     if not is_owner(cq.from_user.id):
         return await deny(cq)
-    await cq.message.edit_text("💸 На что потратил?", reply_markup=kb.expense_categories())
+    await cq.message.edit_text("ð  На что потратил?", reply_markup=kb.expense_categories())
     await cq.answer()
 
 
-@router.callback_query(F.data.startswith("exp_cat:"))
+@router.callback_query(F.data.startswith("ecat:"))
 async def cb_expense_cat(cq: CallbackQuery, state: FSMContext):
     if not is_owner(cq.from_user.id):
         return await deny(cq)
-    cat = cq.data.split(":", 1)[1]
-    await state.update_data(exp_cat=cat)
+    ci = int(cq.data.split(":", 1)[1])
+    cats = cat_mod.category_list()
+    if ci < 0 or ci >= len(cats):
+        return await cq.answer()
+    c = cats[ci]
+    subs = cat_mod.subs_of(c)
+    if not subs and not cat_mod.has_llm(c):
+        await state.update_data(exp_cat=c, exp_sub=None)
+        await state.set_state(ExpenseFSM.amount)
+        await cq.message.edit_text(f"ð  {c}\n\nВведи сумму в рублях:")
+        return await cq.answer()
+    await cq.message.edit_text(f"ð  {c} — уточни:", reply_markup=kb.expense_subs(ci))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("esub:"))
+async def cb_expense_sub(cq: CallbackQuery, state: FSMContext):
+    if not is_owner(cq.from_user.id):
+        return await deny(cq)
+    _, ci, si = cq.data.split(":")
+    ci, si = int(ci), int(si)
+    c = cat_mod.category_list()[ci]
+    sub = cat_mod.subs_of(c)[si]
+    await state.update_data(exp_cat=c, exp_sub=sub)
     await state.set_state(ExpenseFSM.amount)
-    await cq.message.edit_text(f"💸 {cat}\n\nВведи сумму в рублях:")
+    await cq.message.edit_text(f"ð  {c} / {sub}\n\nВведи сумму в рублях:")
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("eoth:"))
+async def cb_expense_other(cq: CallbackQuery, state: FSMContext):
+    if not is_owner(cq.from_user.id):
+        return await deny(cq)
+    ci = int(cq.data.split(":", 1)[1])
+    c = cat_mod.category_list()[ci]
+    await state.update_data(exp_cat=c, exp_sub="__OTHER__")
+    await state.set_state(ExpenseFSM.amount)
+    await cq.message.edit_text(f"ð  {c} / другое\n\nВведи сумму в рублях:")
     await cq.answer()
 
 
@@ -207,24 +243,38 @@ async def expense_amount(message: Message, state: FSMContext):
     if amount is None or amount <= 0:
         return await message.answer("Не понял сумму. Введи положительное число:")
     data = await state.get_data()
-    cat = data.get("exp_cat", "Прочее")
+    catn = data.get("exp_cat", "Прочее")
+    sub = data.get("exp_sub")
     await state.update_data(exp_amount=amount)
-
-    # Если это погашение долга — спросить какой именно
-    if cat == "Долги/кредиты":
+    if sub == "Долги/кредиты":
         try:
             all_debts = SHEETS.get_debts()
         except Exception as e:
-            logger.error(f"Ошибка чтения долгов: {e}")
-            return await message.answer("⚠️ Google недоступен. Попробуй позже.", reply_markup=kb.back_home())
+            logger.error(f"debts err: {e}")
+            return await message.answer("⚠️ Google недоступен.", reply_markup=kb.back_home())
         await state.set_state(ExpenseFSM.which_debt)
-        return await message.answer(
-            f"Гасим {amount:,} ₽. Какой долг?",
-            reply_markup=kb.debts_to_pay(all_debts))
+        return await message.answer(f"Гасим {amount:,} ₽. Какой долг?", reply_markup=kb.debts_to_pay(all_debts))
+    if sub == "__OTHER__":
+        await state.set_state(ExpenseFSM.other_desc)
+        return await message.answer("На что именно? Напиши коротко (например: «зарядка для телефона»):")
+    await _finalize_expense(message, state, catn, sub, amount, note="")
 
-    # Обычный расход — спросить заметку
-    await state.set_state(ExpenseFSM.note)
-    await message.answer("Добавь заметку или пропусти:", reply_markup=kb.skip_or_back())
+
+@router.message(ExpenseFSM.other_desc)
+async def expense_other_desc(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        return await deny(message)
+    desc = message.text.strip()
+    data = await state.get_data()
+    catn = data.get("exp_cat", "Прочее")
+    amount = data.get("exp_amount", 0)
+    try:
+        ops = SHEETS.get_operations()
+        existing = categorize_mod.existing_subs_from_operations(ops, catn)
+    except Exception:
+        existing = []
+    sub = await categorize_mod.categorize_other(catn, desc, existing)
+    await _finalize_expense(message, state, catn, sub, amount, note=desc)
 
 
 @router.callback_query(ExpenseFSM.which_debt, F.data.startswith("paydebt:"))
@@ -235,55 +285,32 @@ async def cb_paydebt(cq: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     amount = data.get("exp_amount", 0)
     await state.clear()
-
     try:
-        # записываем расход
-        new_balance = SHEETS.add_operation("Расход", "Долги/кредиты", -amount, f"погашение: {debt_name}")
-        # уменьшаем остаток долга
-        new_remaining = SHEETS.reduce_debt(debt_name, amount)
+        nb_ = SHEETS.add_operation("Расход", "Платежи / Долги/кредиты", -amount, f"погашение: {debt_name}")
+        rem = SHEETS.reduce_debt(debt_name, amount)
     except Exception as e:
-        logger.error(f"Ошибка погашения долга: {e}")
-        return await cq.message.edit_text("⚠️ Ошибка записи. Попробуй ещё раз.", reply_markup=kb.back_home())
-
-    txt = (f"✅ Погашено {amount:,} ₽ по долгу «{debt_name}»\n"
-           f"Остаток по нему: {int(new_remaining):,} ₽\n"
-           f"Баланс: {new_balance:,} ₽")
-    if new_remaining == 0:
-        txt += f"\n\n🎉 Долг «{debt_name}» закрыт полностью!"
-    await cq.message.edit_text(txt, reply_markup=kb.back_home())
+        logger.error(f"pay err: {e}")
+        return await cq.message.edit_text("⚠️ Ошибка записи.", reply_markup=kb.back_home())
+    txt = f"✅ Погашено {amount:,} ₽ по «{debt_name}»\nОстаток: {int(rem):,} ₽\nБаланс: {nb_:,} ₽"
+    if rem == 0:
+        txt += f"\n\n🎉 Долг «{debt_name}» закрыт!"
+    await cq.message.edit_text(txt)
+    await cq.message.answer("💼 Главное меню:", reply_markup=kb.main_menu())
     await cq.answer()
 
 
-@router.callback_query(ExpenseFSM.note, F.data == "skip_note")
-async def cb_skip_note(cq: CallbackQuery, state: FSMContext):
-    if not is_owner(cq.from_user.id):
-        return await deny(cq)
-    await finalize_expense(cq.message, state, note="", edit=True)
-    await cq.answer()
-
-
-@router.message(ExpenseFSM.note)
-async def expense_note(message: Message, state: FSMContext):
-    if not is_owner(message.from_user.id):
-        return await deny(message)
-    await finalize_expense(message, state, note=message.text.strip(), edit=False)
-
-
-async def finalize_expense(message: Message, state: FSMContext, note: str, edit: bool):
-    data = await state.get_data()
-    cat = data.get("exp_cat", "Прочее")
-    amount = data.get("exp_amount", 0)
+async def _finalize_expense(message: Message, state: FSMContext, catn, sub, amount, note):
     await state.clear()
+    full_cat = cat_mod.full_name(catn, sub if sub and sub != "__OTHER__" else None)
     try:
-        new_balance = SHEETS.add_operation("Расход", cat, -amount, note)
+        nb_ = SHEETS.add_operation("Расход", full_cat, -amount, note)
     except Exception as e:
-        logger.error(f"Ошибка записи расхода: {e}")
-        msg = "⚠️ Google недоступен, расход НЕ записан. Попробуй ещё раз."
-        return await (message.edit_text(msg, reply_markup=kb.back_home()) if edit
-                      else message.answer(msg, reply_markup=kb.back_home()))
-    txt = f"✅ Расход {amount:,} ₽ ({cat}) записан.\nБаланс: {new_balance:,} ₽"
-    await (message.edit_text(txt, reply_markup=kb.back_home()) if edit
-           else message.answer(txt, reply_markup=kb.back_home()))
+        logger.error(f"exp err: {e}")
+        await message.answer("⚠️ Google недоступен, расход НЕ записан.", reply_markup=kb.back_home())
+        return
+    txt = f"✅ Расход {amount:,} ₽ ({full_cat}) записан.\nБаланс: {nb_:,} ₽"
+    await message.answer(txt)
+    await message.answer("💼 Главное меню:", reply_markup=kb.main_menu())
 
 
 # ============================================================
@@ -332,23 +359,34 @@ async def cb_cat_remain(cq: CallbackQuery):
 async def cb_rem_cat(cq: CallbackQuery):
     if not is_owner(cq.from_user.id):
         return await deny(cq)
-    cat = cq.data.split(":", 1)[1]
+    ci = int(cq.data.split(":", 1)[1])
+    cats = cat_mod.category_list()
+    if ci < 0 or ci >= len(cats):
+        return await cq.answer()
+    category = cats[ci]
     try:
         ops = SHEETS.get_operations()
-        spent = fin.spent_by_category_this_month(ops, cat)
+        import datetime as _dt
+        today = _dt.date.today()
+        start_d = today.replace(day=1)
+        total = 0
+        for op in ops:
+            d = op.get("дата")
+            if d is None:
+                continue
+            dd = d.date() if hasattr(d, "date") else d
+            c = str(op.get("категория", ""))
+            amt = float(op.get("сумма", 0) or 0)
+            if dd >= start_d and amt < 0 and (c == category or c.startswith(category + " /")):
+                total += abs(amt)
+        spent = round(total)
     except Exception as e:
-        logger.error(f"Ошибка категории: {e}")
+        logger.error(f"cat err: {e}")
         return await cq.message.edit_text("⚠️ Google недоступен.", reply_markup=kb.back_home())
-    now = datetime.date.today()
-    txt = (f"🍔 {cat} за {now.strftime('%B %Y')}:\n\n"
-           f"Потрачено с 1 числа: {spent:,} ₽")
+    txt = f"🍔 {category} за этот месяц:\n\nПотрачено с 1 числа: {spent:,} ₽"
     await cq.message.edit_text(txt, reply_markup=kb.back_home())
     await cq.answer()
 
-
-# ============================================================
-# ЧТО ГОРИТ
-# ============================================================
 @router.callback_query(F.data == "whatburns")
 async def cb_whatburns(cq: CallbackQuery):
     if not is_owner(cq.from_user.id):

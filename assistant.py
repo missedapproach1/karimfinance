@@ -83,20 +83,31 @@ async def ask_assistant(user_text, data, history=None):
 
 
 def _parse(text):
-    t = text.strip()
+    import re as _re
+    t = (text or "").strip()
     if t.startswith("```"):
         t = t.strip("`")
-        if t.startswith("json"):
+        if t.lower().startswith("json"):
             t = t[4:]
         t = t.strip()
+    obj = None
     try:
-        o = json.loads(t)
-        a = o.get("action")
+        obj = json.loads(t)
+    except Exception:
+        m = _re.search(r"\{.*\}", t, _re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+            except Exception:
+                obj = None
+    if isinstance(obj, dict) and "reply" in obj:
+        a = obj.get("action")
         if a and not isinstance(a, dict):
             a = None
-        return {"reply": str(o.get("reply","")).strip() or "Готово.", "action": a}
-    except Exception:
-        return {"reply": text, "action": None}
+        reply = str(obj.get("reply", "")).strip().replace("**", "").strip()
+        return {"reply": reply or "Готово.", "action": a}
+    clean = t.replace("**", "").strip()
+    return {"reply": clean, "action": None}
 
 
 async def transcribe_voice(file_bytes):

@@ -100,7 +100,6 @@ async def a_text(message: Message, state: FSMContext):
 async def a_voice(message: Message, state: FSMContext):
     if not H.is_owner(message.from_user.id):
         return await H.deny(message)
-    await message.answer("🎧 Слушаю...")
     try:
         bot = message.bot
         file = await bot.get_file(message.voice.file_id)
@@ -111,7 +110,6 @@ async def a_voice(message: Message, state: FSMContext):
         return await message.answer("Не смог распознать. Напиши текстом.", reply_markup=_kb_exit())
     if not text:
         return await message.answer("Не разобрал. Ещё раз или текстом.", reply_markup=_kb_exit())
-    await message.answer(f"📝 Расслышал: «{text}»")
     await _process(message, state, text)
 
 
