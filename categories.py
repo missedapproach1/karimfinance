@@ -1,4 +1,4 @@
-"""Двухуровневые категории расходов."""
+"""Двухуровневые категории бытовых расходов."""
 
 CATEGORIES = {
     "Еда": {
@@ -8,10 +8,6 @@ CATEGORIES = {
     "Курение": {"subs": [], "llm": False},
     "Транспорт": {
         "subs": ["Каршеринг", "Метро", "Такси", "Самокаты"],
-        "llm": True,
-    },
-    "Платежи": {
-        "subs": ["Аренда", "Связь", "Штрафы", "Долги/кредиты", "Подписки"],
         "llm": True,
     },
     "Покупки": {
@@ -38,3 +34,8 @@ def full_name(category, sub=None):
     if sub:
         return f"{category} / {sub}"
     return category
+
+
+def top_level(full_category: str) -> str:
+    """'Еда / Доставка' -> 'Еда'; 'Курение' -> 'Курение'."""
+    return full_category.split(" / ", 1)[0].strip()

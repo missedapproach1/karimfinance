@@ -1,4 +1,4 @@
-"""Хендлеры помощника."""
+"""Хендлеры помощника — только запись расходов и вопросы по тратам."""
 import logging
 import datetime
 from aiogram import Router, F
@@ -6,15 +6,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-import config
+
 import assistant
-import debts as debts_mod
-import finance as fin
+import categories as cat_mod
+import stats as stats_mod
 import handlers as H
 
 logger = logging.getLogger(__name__)
 arouter = Router()
-CONFIRM_THRESHOLD = assistant.CONFIRM_THRESHOLD
+CONFIRM_THRESHOLD = 5000  # расход крупнее — переспросить (защита от опечатки/недослыша)
 
 
 class AssistantFSM(StatesGroup):
@@ -24,7 +24,7 @@ class AssistantFSM(StatesGroup):
 
 def _kb_confirm():
     b = InlineKeyboardBuilder()
-    b.button(text="✅ Да, выполни", callback_data="asst_yes")
+    b.button(text="✅ Да, запиши", callback_data="asst_yes")
     b.button(text="❌ Отмена", callback_data="asst_no")
     b.adjust(2)
     return b.as_markup()
@@ -32,22 +32,13 @@ def _kb_confirm():
 
 def _kb_exit():
     b = InlineKeyboardBuilder()
-    b.button(text="🚪 Выйти из диалога", callback_data="home")
+    b.button(text="🚪 Выйти в меню", callback_data="home")
     return b.as_markup()
 
 
 def _build_data():
-    today = datetime.date.today()
-    balance = H.SHEETS.get_last_balance()
-    settings = H.SHEETS.get_settings()
-    all_debts = H.SHEETS.get_debts()
-    sd = debts_mod.get_debts_sorted(all_debts, today)
-    obl = fin.remaining_obligations_this_period(settings, all_debts)
-    d2i = H.days_to_income()
-    free = balance - obl
-    return {"баланс": balance, "дней_до_дохода": d2i, "на_жизнь": max(0, free),
-            "общий_долг": debts_mod.total_debt(all_debts),
-            "долг_людям": debts_mod.total_people_debt(all_debts), "долги_топ": sd}
+    ops = H.SHEETS.get_operations()
+    return stats_mod.month_to_date(ops, datetime.date.today())
 
 
 @arouter.callback_query(F.data == "assistant")
@@ -57,8 +48,8 @@ async def cb_assistant(cq: CallbackQuery, state: FSMContext):
     await state.set_state(AssistantFSM.chatting)
     await state.update_data(history=[])
     await cq.message.edit_text(
-        "💬 Помощник на связи.\n\nПиши или диктуй голосом: что хочешь сделать, спланировать, спроси совет. "
-        "Например: «хочу послезавтра скинуть Наташе 20к, что думаешь?» или «запиши расход 800 на еду».",
+        "💬 Помощник на связи.\n\nПиши или диктуй: записать трату или спросить по расходам. "
+        "Например: «потратил 800 на доставку» или «сколько ушло на еду в этом месяце?»",
         reply_markup=_kb_exit())
     await cq.answer()
 
@@ -72,7 +63,7 @@ async def cb_yes(cq: CallbackQuery, state: FSMContext):
     await state.set_state(AssistantFSM.chatting)
     await state.update_data(pending_action=None)
     if not action:
-        await cq.message.edit_text("Нечего выполнять.", reply_markup=_kb_exit())
+        await cq.message.edit_text("Нечего записывать.", reply_markup=_kb_exit())
         return await cq.answer()
     res = await _execute(action)
     await cq.message.edit_text(res, reply_markup=_kb_exit())
@@ -126,65 +117,33 @@ async def _process(message: Message, state: FSMContext, text: str):
     action = res.get("action")
     history = history + [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
     await state.update_data(history=history[-12:])
-    if not action:
-        return await message.answer(reply, reply_markup=_kb_exit())
-    summary = _describe(action)
+    if not action or action.get("type") != "add_expense":
+        return await message.answer(reply or "Готово.", reply_markup=_kb_exit())
     amount = abs(int(action.get("amount", 0) or 0))
-    needs = amount >= CONFIRM_THRESHOLD or action.get("type") in ("pay_debt", "set_setting")
-    if needs:
+    if amount >= CONFIRM_THRESHOLD:
         await state.set_state(AssistantFSM.confirm)
         await state.update_data(pending_action=action)
-        await message.answer(f"{reply}\n\n🔸 {summary}\nВыполнить?", reply_markup=_kb_confirm())
+        await message.answer(f"{reply}\n\n🔸 {_describe(action)}\nЗаписать?", reply_markup=_kb_confirm())
     else:
         out = await _execute(action)
         await message.answer(f"{reply}\n\n{out}", reply_markup=_kb_exit())
 
 
 def _describe(a):
-    t = a.get("type")
-    amt = int(a.get("amount", 0) or 0)
-    if t == "add_income":
-        return f"Записать ДОХОД {amt:,} ₽ ({a.get('category','Прочее')})"
-    if t == "add_expense":
-        return f"Записать РАСХОД {amt:,} ₽ ({a.get('category','Прочее')})"
-    if t == "pay_debt":
-        return f"Погасить «{a.get('debt_name','?')}» на {amt:,} ₽"
-    if t == "set_balance":
-        return f"Выставить баланс {amt:,} ₽"
-    if t == "set_setting":
-        return f"Изменить «{a.get('param','?')}» на {a.get('value','?')}"
-    return "Действие"
+    amt = abs(int(a.get("amount", 0) or 0))
+    full = cat_mod.full_name(a.get("category", "Покупки"), a.get("sub"))
+    return f"Расход {amt:,} ₽ ({full})"
 
 
 async def _execute(a):
-    t = a.get("type")
     try:
-        if t == "add_income":
-            amt = abs(int(a.get("amount", 0) or 0)); cat = a.get("category", "Прочее")
-            bal = H.SHEETS.add_operation("Доход", cat, amt, "через помощника")
-            return f"✅ Доход {amt:,} ₽ записан. Баланс: {bal:,} ₽"
-        if t == "add_expense":
-            amt = abs(int(a.get("amount", 0) or 0)); cat = a.get("category", "Прочее")
-            bal = H.SHEETS.add_operation("Расход", cat, -amt, "через помощника")
-            return f"✅ Расход {amt:,} ₽ ({cat}) записан. Баланс: {bal:,} ₽"
-        if t == "pay_debt":
-            amt = abs(int(a.get("amount", 0) or 0)); name = a.get("debt_name", "")
-            bal = H.SHEETS.add_operation("Расход", "Долги/кредиты", -amt, f"погашение: {name}")
-            rem = H.SHEETS.reduce_debt(name, amt)
-            txt = f"✅ Погашено {amt:,} ₽ по «{name}». Остаток: {int(rem):,} ₽. Баланс: {bal:,} ₽"
-            if rem == 0:
-                txt += f"\n🎉 «{name}» закрыт!"
-            return txt
-        if t == "set_balance":
-            amt = abs(int(a.get("amount", 0) or 0))
-            r = H.SHEETS.set_balance(amt)
-            if r["diff"] == 0:
-                return f"✅ Баланс уже точный: {r['new']:,} ₽"
-            return f"✅ Баланс: {r['new']:,} ₽ (корректировка {r['diff']:+,} ₽)"
-        if t == "set_setting":
-            H.SHEETS.update_setting(a.get("param",""), a.get("value",""))
-            return f"✅ «{a.get('param','')}» = {a.get('value','')}"
-        return "Неизвестное действие."
+        amt = abs(int(a.get("amount", 0) or 0))
+        catn = a.get("category", "Покупки")
+        sub = a.get("sub")
+        note = a.get("note", "") or ""
+        full = cat_mod.full_name(catn, sub if sub else None)
+        H.SHEETS.add_operation("Расход", full, -amt, note)
+        return f"✅ Записал: {amt:,} ₽ — {full}"
     except Exception as e:
-        logger.error(f"exec err {t}: {e}")
-        return "⚠️ Не удалось выполнить. Попробуй через кнопки меню."
+        logger.error(f"exec err: {e}")
+        return "⚠️ Не удалось записать. Попробуй через кнопку «Расход»."

@@ -1,53 +1,44 @@
-"""Диалоговый помощник."""
+"""Диалоговый помощник — только расходы."""
 import json
 import logging
 import httpx
 import config
+import categories as cat
 
 logger = logging.getLogger(__name__)
-CONFIRM_THRESHOLD = 5000
 
 BOT_KNOWLEDGE = """
-ФУНКЦИОНАЛ БОТА:
-- 💰 Доход — записать доход (Такси/Зарплата/Родители/Прочее), бот сам покажет распределение.
-- 💸 Расход — трата по категории (Еда, Каршеринг, Метро, Аренда, Связь, Долги/кредиты, Разработка, Озон, Прочее).
-- 📊 Сколько есть — баланс и свободно на жизнь.
-- 🍔 Остаток на категорию — потрачено за месяц.
-- ⚠️ Что горит — ближайшие платежи и просрочки.
-- 🤖 Совет — финансовый совет.
-- 📋 Мои долги — долги по приоритету.
-- ⚙️ Настройки — оклад, премия, аренда, связь.
-- 🔄 Выставить баланс — подогнать под реальную сумму.
-Зарплата авто 1 и 16 числа. Все деньги в одном кошельке, рубли. Долги гасить: просрочки -> дорогие микрозаймы -> банки -> беспроцентные людям.
+ЭТО БОТ УЧЁТА РАСХОДОВ. Доходы, долги и баланс тут НЕ ведутся.
+Кнопки: 💸 Расход (выбрать категорию и сумму), 📊 Статистика с начала месяца, 💬 Помощник (этот чат).
+Категории расходов: Еда, Курение, Транспорт, Покупки, Развлечения.
 """
 
-SYSTEM_PROMPT = """Ты — личный финансовый помощник в Telegram-боте. Пользователь пишет текстом или голосом. Помогай коротко и по делу.
-""" + BOT_KNOWLEDGE + """
-ПРАВИЛА:
-- КОРОТКО, 2-3 абзаца макс, без воды.
-- Тон спокойный, на стороне человека. У него долги, много работает.
-- Используй ТОЛЬКО данные что дали, не выдумывай цифры.
-- "Как сделать X" — объясни какую кнопку нажать.
-- Хочет записать операцию — предложи в поле action.
-ДЕЙСТВИЯ (бот выполнит сам):
-- add_income: amount, category
-- add_expense: amount, category
-- pay_debt: amount, debt_name
-- set_balance: amount
-- set_setting: param, value
-ОГРАНИЧЕНИЯ: только эти действия, ничего не удалять/чистить. Не уверен — переспроси, не предлагай action. Одно действие за раз.
-ФОРМАТ — строго JSON без markdown:
-{"reply": "ответ", "action": null или {"type":"add_expense","amount":500,"category":"Еда"}}
+SYSTEM_PROMPT = ("""Ты — помощник по учёту расходов в Telegram-боте. Пользователь пишет текстом или диктует голосом. Отвечай коротко и по делу, без воды.
 """
+    + BOT_KNOWLEDGE +
+    """
+ЧТО ТЫ МОЖЕШЬ:
+1. Записать расход — если пользователь сказал, что потратил (например «потратил 800 на доставку», «350 сигареты»). Тогда верни action add_expense.
+2. Ответить на вопрос про траты (сколько потрачено, на что больше всего и т.п.) — по данным, что дали. Не выдумывай цифры.
+
+ДЕЙСТВИЕ (бот выполнит сам):
+add_expense: amount (число, рубли), category (одна из: Еда, Курение, Транспорт, Покупки, Развлечения), sub (подкатегория словом или null), note (короткое описание или "")
+
+ОГРАНИЧЕНИЯ: только запись расхода. Никаких доходов, долгов, баланса, удаления. Категорию выбирай ТОЛЬКО из списка выше. Не уверен в категории — ставь "Покупки" и опиши в note. Одно действие за раз.
+
+ФОРМАТ — строго JSON без markdown:
+{"reply": "короткий ответ", "action": null или {"type":"add_expense","amount":800,"category":"Еда","sub":"Доставка","note":""}}
+""")
 
 
 def _build_context(data):
-    lines = ["ДАННЫЕ:", f"Баланс: {data.get('баланс',0):,} руб",
-             f"Свободно: {data.get('на_жизнь',0):,} руб, дней до дохода {data.get('дней_до_дохода','?')}",
-             f"Долг всего: {data.get('общий_долг',0):,} (людям {data.get('долг_людям',0):,})"]
-    for d in data.get("долги_топ", [])[:8]:
-        p = " ПРОСРОЧКА" if str(d.get("просрочка","")).upper()=="ДА" else ""
-        lines.append(f"  - {d['название']}: {int(d['остаток']):,} руб, {int(d.get('ставка',0))}%{p}")
+    lines = ["РАСХОДЫ С НАЧАЛА МЕСЯЦА:",
+             f"Всего: {data.get('total', 0):,} руб, трат: {data.get('count', 0)}"]
+    by_cat = data.get("by_cat", {})
+    if by_cat:
+        lines.append("По категориям:")
+        for c, v in sorted(by_cat.items(), key=lambda x: -x[1]):
+            lines.append(f"  - {c}: {int(v):,} руб")
     return "\n".join(lines)
 
 
@@ -61,8 +52,8 @@ async def ask_assistant(user_text, data, history=None):
     url = f"{config.LLM_BASE_URL}/v1/messages"
     body = {"model": config.LLM_MODEL, "max_tokens": 1024, "system": SYSTEM_PROMPT, "messages": messages}
     variants = [
-        {"x-api-key": config.LLM_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
         {"Authorization": f"Bearer {config.LLM_API_KEY}", "anthropic-version": "2023-06-01", "content-type": "application/json"},
+        {"x-api-key": config.LLM_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
     ]
     async with httpx.AsyncClient(timeout=40.0) as client:
         for h in variants:
@@ -74,7 +65,7 @@ async def ask_assistant(user_text, data, history=None):
                     logger.warning(f"assistant HTTP {r.status_code}: {r.text[:300]}")
                 r.raise_for_status()
                 parts = r.json().get("content", [])
-                text = "".join(p.get("text","") for p in parts if p.get("type")=="text").strip()
+                text = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
                 return _parse(text)
             except Exception as e:
                 logger.warning(f"assistant err: {e}")
@@ -121,7 +112,7 @@ async def transcribe_voice(file_bytes):
         async with httpx.AsyncClient(timeout=60.0) as client:
             r = await client.post(url, headers=headers, files=files, data=data)
             r.raise_for_status()
-            return r.json().get("text","").strip()
+            return r.json().get("text", "").strip()
     except Exception as e:
         logger.warning(f"transcribe err: {e}")
         return ""
